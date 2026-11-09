@@ -1,0 +1,38 @@
+name: PHP Security Check
+description: One plain-English report on your PHP version, php.ini settings and Composer packages.
+branding:
+  icon: shield
+  color: blue
+inputs:
+  path:
+    description: Folder containing composer.lock
+    default: .
+  php-version:
+    description: The PHP version production runs. Defaults to the version on the runner.
+    default: ''
+  ini:
+    description: Path to the php.ini your production server uses
+    default: ''
+  fail-on:
+    description: Fail the job at this severity or above (low, medium, high, critical, none)
+    default: high
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PSC_PATH: ${{ inputs.path }}
+        PSC_PHP: ${{ inputs.php-version }}
+        PSC_INI: ${{ inputs.ini }}
+        PSC_FAIL: ${{ inputs.fail-on }}
+      run: |
+        args=("$PSC_PATH" "--fail-on=$PSC_FAIL")
+        [ -n "$PSC_PHP" ] && args+=("--php-version=$PSC_PHP")
+        [ -n "$PSC_INI" ] && args+=("--ini=$PSC_INI")
+        set +e
+        php "$GITHUB_ACTION_PATH/bin/php-security-check" "${args[@]}" | tee report.txt
+        code=${PIPESTATUS[0]}
+        set -e
+        { echo '```'; cat report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        rm -f report.txt
+        exit "$code"

@@ -1,0 +1,33 @@
+{
+  "advisories": [
+    {
+      "name": "PHP2Shell",
+      "cves": [
+        "CVE-2026-109618",
+        "CVE-2026-109619"
+      ],
+      "severity": "critical",
+      "fixed": {
+        "8.2": "8.2.35",
+        "8.3": "8.3.36",
+        "8.4": "8.4.27",
+        "8.5": "8.5.12"
+      },
+      "affects_unlisted_older": true,
+      "oldest_fixed_branch": "8.2",
+      "learn": "https://phpscientist.com/blog/php-security-release-october-2026-cve-2026-109618-cve-2026-109619/?utm_source=php-security-check&utm_medium=cli"
+    }
+  ],
+  "learn": {
+    "CVE-2026-121623": "https://phpscientist.com/blog/symfony-cve-2026-121623-cve-2026-123792/?utm_source=php-security-check&utm_medium=cli",
+    "CVE-2026-123792": "https://phpscientist.com/blog/symfony-cve-2026-121623-cve-2026-123792/?utm_source=php-security-check&utm_medium=cli",
+    "CVE-2026-121971": "https://phpscientist.com/blog/symfony-cve-2026-121623-cve-2026-123792/?utm_source=php-security-check&utm_medium=cli",
+    "CVE-2026-118513": "https://phpscientist.com/blog/symfony-cve-2026-121623-cve-2026-123792/?utm_source=php-security-check&utm_medium=cli",
+    "CVE-2026-114509": "https://phpscientist.com/blog/laravel-tokenguard-auth-bypass-cve-2026-114509/?utm_source=php-security-check&utm_medium=cli",
+    "GHSA-pxj9-jh84-vhm5": "https://phpscientist.com/blog/symfony-cve-2026-121623-cve-2026-123792/?utm_source=php-security-check&utm_medium=cli",
+    "GHSA-hwfg-qwvh-2wfx": "https://phpscientist.com/blog/symfony-cve-2026-121623-cve-2026-123792/?utm_source=php-security-check&utm_medium=cli",
+    "GHSA-gq53-v8w2-gjhj": "https://phpscientist.com/blog/symfony-cve-2026-121623-cve-2026-123792/?utm_source=php-security-check&utm_medium=cli",
+    "GHSA-5w3m-mfwg-9f8r": "https://phpscientist.com/blog/symfony-cve-2026-121623-cve-2026-123792/?utm_source=php-security-check&utm_medium=cli",
+    "GHSA-6prc-h956-hxjq": "https://phpscientist.com/blog/symfony-cve-2026-121623-cve-2026-123792/?utm_source=php-security-check&utm_medium=cli"
+  }
+}
