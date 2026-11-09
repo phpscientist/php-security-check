@@ -21,3 +21,5 @@ jobs:
           path: tests/fixtures/app
           php-version: '8.5.12'
           fail-on: none
+          sarif: psc.sarif
+      - run: php -r 'exit(json_decode(file_get_contents("psc.sarif"), true)["version"] === "2.1.0" ? 0 : 1);'

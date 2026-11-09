@@ -13,6 +13,9 @@ inputs:
   ini:
     description: Path to the php.ini your production server uses
     default: ''
+  sarif:
+    description: Write a SARIF report to this file, for upload to GitHub code scanning
+    default: ''
   fail-on:
     description: Fail the job at this severity or above (low, medium, high, critical, none)
     default: high
@@ -25,10 +28,12 @@ runs:
         PSC_PHP: ${{ inputs.php-version }}
         PSC_INI: ${{ inputs.ini }}
         PSC_FAIL: ${{ inputs.fail-on }}
+        PSC_SARIF: ${{ inputs.sarif }}
       run: |
         args=("$PSC_PATH" "--fail-on=$PSC_FAIL")
         [ -n "$PSC_PHP" ] && args+=("--php-version=$PSC_PHP")
         [ -n "$PSC_INI" ] && args+=("--ini=$PSC_INI")
+        [ -n "$PSC_SARIF" ] && args+=("--sarif=$PSC_SARIF")
         set +e
         php "$GITHUB_ACTION_PATH/bin/php-security-check" "${args[@]}" | tee report.txt
         code=${PIPESTATUS[0]}

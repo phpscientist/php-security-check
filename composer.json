@@ -1,0 +1,10 @@
+{
+    "name": "phpscientist/php-security-check",
+    "description": "One plain-English report on the PHP version and settings your web server really uses, Composer packages, and common Laravel, Symfony and WordPress mistakes.",
+    "type": "project",
+    "license": "MIT",
+    "keywords": ["security", "php", "composer", "cve", "audit", "laravel", "symfony", "wordpress", "php-ini"],
+    "homepage": "https://github.com/phpscientist/php-security-check",
+    "require": { "php": ">=8.1" },
+    "bin": ["bin/php-security-check"]
+}

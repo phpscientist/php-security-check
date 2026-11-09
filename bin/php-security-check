@@ -5,11 +5,11 @@ declare(strict_types=1);
 
 /**
  * php-security-check: one plain-English report on a PHP project's security basics.
- * Checks the PHP version (support status, latest patch, known core flaws), php.ini settings and composer.lock.
+ * Checks the PHP version and php.ini your web server really uses, composer.lock, and common Laravel, Symfony and WordPress mistakes.
  * No dependencies. Reads public data from php.net, endoflife.date and Packagist; sends only package names.
  */
 
-const TOOL_VERSION = '0.1.1';
+const TOOL_VERSION = '0.2.0';
 const DATA_URL = 'https://raw.githubusercontent.com/phpscientist/php-security-check/main/data/php-core.json';
 const HOME = 'https://phpscientist.com/tools/?utm_source=php-security-check&utm_medium=cli';
 const RANK = ['info' => 0, 'low' => 1, 'medium' => 2, 'high' => 3, 'critical' => 4];
@@ -20,11 +20,14 @@ function usage(): string
     php-security-check {TOOL} - PHP version, php.ini and Composer checks in one report
 
     Usage: php-security-check [path] [options]
+           php-security-check probe [--dir=public]   Create a one-time file that reports what your web server runs
 
       path                  Project folder with composer.lock (default: current folder)
       --php-version=X.Y.Z   Check this version instead of the one running this tool.
                             Use it for the version your WEB SERVER runs, which can differ.
       --ini=FILE            Check this php.ini instead of the current settings
+      --probe=URL           Read the real PHP version and settings from a probe file on your server
+      --sarif=FILE          Also write a SARIF report for GitHub code scanning
       --format=text|json    Output format (default: text)
       --fail-on=LEVEL       Exit 1 at this severity or above: low, medium, high, critical, none (default: high)
       --no-network          Skip checks that need online data (reported as not checked)
@@ -42,6 +45,8 @@ function parseArgs(array $argv): array
     foreach (array_slice($argv, 1) as $a) {
         if (preg_match('/^--([a-z-]+)(?:=(.*))?$/', $a, $m)) {
             $out[$m[1]] = $m[2] ?? true;
+        } elseif ($a === 'probe' && !isset($out['command'])) {
+            $out['command'] = 'probe';
         } else {
             $out['path'] = $a;
         }
@@ -104,9 +109,34 @@ function versionInRange(string $version, string $range): bool
     return false;
 }
 
-function finding(string $check, string $severity, string $title, string $fix, ?string $link = null): array
+/** `id` is stable between runs, so a finding can be listed in the ignore file. */
+function finding(string $id, string $check, string $severity, string $title, string $fix, ?string $link = null): array
 {
-    return compact('check', 'severity', 'title', 'fix', 'link');
+    return compact('id', 'check', 'severity', 'title', 'fix', 'link');
+}
+
+/** The lowest version outside the affected range that the installed version is in, or null if none is listed. */
+function fixedVersion(string $version, string $range): ?string
+{
+    foreach (preg_split('/\s*\|+\s*/', trim($range)) ?: [] as $group) {
+        if (versionInRange($version, $group) && preg_match('/<\s*([^,\s<=]+)(?:,|\s|$)/', $group, $m) && !str_contains($m[0], '<=')) {
+            return normalizeVersion($m[1]);
+        }
+    }
+    return null;
+}
+
+/** patch, minor or major: how big a step it is from one version to another. */
+function upgradeSize(string $from, string $to): string
+{
+    $a = explode('.', normalizeVersion($from));
+    $b = explode('.', normalizeVersion($to));
+    return ($a[0] ?? '') !== ($b[0] ?? '') ? 'major' : (($a[1] ?? '0') !== ($b[1] ?? '0') ? 'minor' : 'patch');
+}
+
+function phpUpgradeCommands(string $target, string $branch): string
+{
+    return "Update to PHP $target, then restart PHP-FPM or Apache. Debian/Ubuntu: apt install --only-upgrade 'php$branch-*'. Docker: rebuild from php:$target. Homebrew: brew upgrade php@$branch. Shared hosting: ask your host, or switch version in the control panel.";
 }
 
 /** @return array{findings:array,errors:array,passed:array} */
@@ -120,7 +150,7 @@ function checkPhpVersion(string $version, bool $offline, array $core): array
         // A branch with no listed fix is only flagged when the advisory covers every older branch.
         $affected = $fixed !== null ? version_compare($version, $fixed, '<') : !empty($a['affects_unlisted_older']) && version_compare($branch, $a['oldest_fixed_branch'], '<');
         if ($affected) {
-            $r['findings'][] = finding('php', $a['severity'], "PHP $version is affected by {$a['name']} (" . implode(', ', $a['cves']) . ')', $fixed !== null ? "Update to PHP $fixed or later and restart every PHP worker." : 'This PHP branch gets no official fix. Move to a supported branch.', $a['learn']);
+            $r['findings'][] = finding('php-core:' . $a['name'], 'php', $a['severity'], "PHP $version is affected by {$a['name']} (" . implode(', ', $a['cves']) . ')', $fixed !== null ? phpUpgradeCommands($fixed, $branch) : 'This PHP branch gets no official fix. Move to a supported branch.', $a['learn']);
         }
     }
 
@@ -147,12 +177,12 @@ function checkPhpVersion(string $version, bool $offline, array $core): array
     $supported = true;
     if (is_string($cycle['eol']) && $cycle['eol'] < $today) {
         $supported = false;
-        $r['findings'][] = finding('php', 'high', "PHP $branch reached end of life on {$cycle['eol']} and gets no security fixes", 'Plan an upgrade to a supported PHP branch.', 'https://phpscientist.com/blog/php-8-2-end-of-life-upgrade-before-december-2026/');
+        $r['findings'][] = finding('php:eol', 'php', 'high', "PHP $branch reached end of life on {$cycle['eol']} and gets no security fixes", 'Plan an upgrade to a supported PHP branch.', 'https://phpscientist.com/blog/php-8-2-end-of-life-upgrade-before-december-2026/');
     } elseif (is_string($cycle['eol']) && (strtotime($cycle['eol']) - time()) / 86400 <= 180) {
-        $r['findings'][] = finding('php', 'medium', "PHP $branch reaches end of life on {$cycle['eol']}", 'Schedule the upgrade now.', 'https://phpscientist.com/blog/php-8-2-end-of-life-upgrade-before-december-2026/');
+        $r['findings'][] = finding('php:eol-soon', 'php', 'medium', "PHP $branch reaches end of life on {$cycle['eol']}", 'Schedule the upgrade now.', 'https://phpscientist.com/blog/php-8-2-end-of-life-upgrade-before-december-2026/');
     }
     if (version_compare($version, (string) $cycle['latest'], '<')) {
-        $r['findings'][] = finding('php', 'medium', "PHP $version is behind the latest $branch release ({$cycle['latest']})", "Update to PHP {$cycle['latest']}.");
+        $r['findings'][] = finding('php:behind', 'php', 'medium', "PHP $version is behind the latest $branch release ({$cycle['latest']})", phpUpgradeCommands((string) $cycle['latest'], $branch));
     } elseif ($supported) {
         $r['passed'][] = "PHP $version is the latest release of a supported branch.";
     }
@@ -178,32 +208,36 @@ function iniBool(mixed $v): bool
     return in_array(strtolower(trim((string) $v)), ['1', 'on', 'yes', 'true'], true);
 }
 
-function checkIni(?string $file): array
+/** @param array<string,mixed>|null $probeIni settings reported by a probe file on the web server */
+function checkIni(?string $file, ?array $probeIni = null): array
 {
-    $r = ['findings' => [], 'errors' => [], 'passed' => []];
-    $values = null;
-    if ($file !== null) {
+    $r = ['findings' => [], 'errors' => [], 'passed' => [], 'iniBlock' => []];
+    $values = $probeIni;
+    if ($file !== null && $values === null) {
         $values = @parse_ini_file($file, false, INI_SCANNER_RAW);
         if ($values === false) {
             $r['errors'][] = "Could not read php.ini file: $file";
             return $r;
         }
-    } elseif (PHP_SAPI === 'cli') {
-        $r['passed'][] = 'Note: php.ini results are for the command line. Use --ini=FILE for the file your web server loads.';
+    } elseif ($values === null && PHP_SAPI === 'cli') {
+        $r['passed'][] = 'Note: php.ini results are for the command line. Use --probe or --ini for what your web server loads.';
     }
     $bad = 0;
     foreach (iniRules() as [$name, $want, $severity, $why]) {
         $raw = $values !== null ? ($values[$name] ?? null) : ini_get($name);
+        $line = "$name = " . ($want ? 'On' : 'Off');
         // Absent from a file means PHP's built-in default applies, which this tool can't assume is safe.
         if ($raw === null || $raw === false) {
-            if ($values !== null) {
-                $r['findings'][] = finding('ini', 'info', "$name is not set in " . basename($file), "Set $name = " . ($want ? 'On' : 'Off') . " explicitly. $why");
+            if ($file !== null) {
+                $r['findings'][] = finding("ini:$name", 'ini', 'info', "$name is not set in " . basename($file), "Set $line explicitly. $why");
+                $r['iniBlock'][] = $line;
             }
             continue;
         }
         if (iniBool($raw) !== $want) {
             $bad++;
-            $r['findings'][] = finding('ini', $severity, "$name should be " . ($want ? 'On' : 'Off'), "Set $name = " . ($want ? 'On' : 'Off') . " in the php.ini your web server loads. $why", 'https://phpscientist.com/tools/php-ini-security-checker/?utm_source=php-security-check&utm_medium=cli');
+            $r['iniBlock'][] = $line;
+            $r['findings'][] = finding("ini:$name", 'ini', $severity, "$name should be " . ($want ? 'On' : 'Off'), "Set $line in the php.ini your web server loads, then restart PHP. $why", 'https://phpscientist.com/tools/php-ini-security-checker/?utm_source=php-security-check&utm_medium=cli');
         }
     }
     if ($bad === 0) {
@@ -214,7 +248,7 @@ function checkIni(?string $file): array
 
 function checkComposer(string $path, bool $offline, array $learn): array
 {
-    $r = ['findings' => [], 'errors' => [], 'passed' => []];
+    $r = ['findings' => [], 'errors' => [], 'passed' => [], 'plan' => []];
     $lockFile = rtrim($path, '/') . '/composer.lock';
     if (!is_file($lockFile)) {
         $r['passed'][] = "No composer.lock in $path, so Composer packages were skipped.";
@@ -225,15 +259,26 @@ function checkComposer(string $path, bool $offline, array $learn): array
         $r['errors'][] = 'composer.lock is not valid JSON.';
         return $r;
     }
+    $root = json_decode((string) @file_get_contents(rtrim($path, '/') . '/composer.json'), true) ?: [];
+    $direct = array_keys(($root['require'] ?? []) + ($root['require-dev'] ?? []));
     $installed = [];
+    $skipped = 0;
     foreach (array_merge($lock['packages'] ?? [], $lock['packages-dev'] ?? []) as $p) {
-        $installed[$p['name']] = $p['version'];
+        if (preg_match('/^v?\d/', (string) $p['version'])) {
+            $installed[$p['name']] = $p['version'];
+        } else {
+            $skipped++; // dev-main and similar have no comparable version
+        }
+    }
+    if ($skipped) {
+        $r['errors'][] = "$skipped Composer package(s) on a development branch were not checked.";
     }
     if ($offline) {
         $r['errors'][] = 'Composer packages not checked (--no-network).';
         return $r;
     }
     $found = 0;
+    $targets = [];
     foreach (array_chunk(array_keys($installed), 100) as $names) {
         $query = implode('&', array_map(static fn ($n) => 'packages[]=' . rawurlencode($n), $names));
         $data = fetchJson('https://packagist.org/api/security-advisories/', $query);
@@ -252,14 +297,201 @@ function checkComposer(string $path, bool $offline, array $learn): array
                 $cve = $a['cve'] ?? null;
                 $ghsa = preg_match('/GHSA(-[a-z0-9]{4}){3}/i', (string) ($a['link'] ?? ''), $m) ? $m[0] : '';
                 $title = (string) $a['title'];
-                $r['findings'][] = finding('composer', $sev, "$name {$installed[$name]}: $title" . ($cve && !str_contains($title, $cve) ? " ($cve)" : ''), 'Update the package to a fixed version: composer update ' . $name, $learn[$cve ?? ''] ?? $learn[$ghsa] ?? ($a['link'] ?? null));
+                $fixed = fixedVersion($installed[$name], (string) $a['affectedVersions']);
+                $t = &$targets[$name];
+                $t['count'] = ($t['count'] ?? 0) + 1;
+                if ($fixed === null) {
+                    $t['unknown'] = true;
+                } elseif (!isset($t['to']) || version_compare($fixed, $t['to'], '>')) {
+                    $t['to'] = $fixed;
+                }
+                unset($t);
+                $fix = $fixed !== null ? "Update $name to $fixed or later." : "No fixed version is listed for your release; check the advisory.";
+                $r['findings'][] = finding("composer:$name:" . ($cve ?: ($a['advisoryId'] ?? $title)), 'composer', $sev, "$name {$installed[$name]}: $title" . ($cve && !str_contains($title, $cve) ? " ($cve)" : ''), $fix, $learn[$cve ?? ''] ?? $learn[$ghsa] ?? ($a['link'] ?? null));
             }
         }
+    }
+    foreach ($targets as $name => $t) {
+        $isDirect = in_array($name, $direct, true);
+        $to = $t['to'] ?? null;
+        $size = $to !== null ? upgradeSize($installed[$name], $to) : null;
+        $command = !$isDirect ? "composer why $name   # find which package needs it, then update that package" : ($size === 'patch' ? "composer update $name --with-dependencies" : ($to !== null ? 'composer require "' . $name . ':^' . $to . '" --with-all-dependencies' : "composer update $name --with-dependencies"));
+        $r['plan'][] = ['package' => $name, 'from' => $installed[$name], 'to' => $to, 'size' => $size, 'direct' => $isDirect, 'advisories' => $t['count'], 'complete' => empty($t['unknown']), 'command' => $command];
     }
     if ($found === 0) {
         $r['passed'][] = count($installed) . ' Composer packages checked: no known advisories.';
     }
     return $r;
+}
+
+/** Values from a dotenv file. Secrets stay in memory: nothing read here is ever printed. */
+function readDotenv(string $file): array
+{
+    $out = [];
+    foreach (@file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+        if (preg_match('/^\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*(.*)$/', $line, $m)) {
+            $out[$m[1]] = trim($m[2], " \t\"'");
+        }
+    }
+    return $out;
+}
+
+function installedPackages(string $path): array
+{
+    $lock = json_decode((string) @file_get_contents(rtrim($path, '/') . '/composer.lock'), true);
+    return ['prod' => array_column($lock['packages'] ?? [], 'version', 'name'), 'dev' => array_column($lock['packages-dev'] ?? [], 'version', 'name')];
+}
+
+function checkFrameworks(string $path, bool $offline): array
+{
+    $r = ['findings' => [], 'errors' => [], 'passed' => []];
+    $base = rtrim($path, '/');
+    $pkg = installedPackages($path);
+    $prod = $pkg['prod'];
+
+    foreach (['public/.env', 'web/.env', 'public_html/.env'] as $f) {
+        if (is_file("$base/$f")) {
+            $r['findings'][] = finding('env:public', 'framework', 'critical', "$f is inside the public web folder", 'Move it out of the web root now and replace every secret it contains.');
+        }
+    }
+
+    if (isset($prod['laravel/framework'])) {
+        $env = is_file("$base/.env") ? readDotenv("$base/.env") : null;
+        if ($env === null) {
+            $r['passed'][] = 'Laravel: no .env here, so environment settings were skipped. Run this on the server to check them.';
+        } else {
+            if (strtolower($env['APP_DEBUG'] ?? '') === 'true') {
+                $r['findings'][] = finding('laravel:app-debug', 'framework', 'high', 'Laravel APP_DEBUG is true', 'Set APP_DEBUG=false on production. Debug pages reveal code, queries and environment values.');
+            }
+            if (($env['APP_ENV'] ?? '') !== 'production') {
+                $r['findings'][] = finding('laravel:app-env', 'framework', 'info', 'Laravel APP_ENV is not "production"', 'Expected on a developer machine. On a server, set APP_ENV=production.');
+            }
+            $key = $env['APP_KEY'] ?? '';
+            if ($key === '') {
+                $r['findings'][] = finding('laravel:app-key', 'framework', 'critical', 'Laravel APP_KEY is empty', 'Run php artisan key:generate. Encrypted data and sessions depend on this key.');
+            } elseif (str_starts_with($key, 'base64:') && !in_array(strlen((string) base64_decode(substr($key, 7), true)), [16, 32], true)) {
+                $r['findings'][] = finding('laravel:app-key-length', 'framework', 'high', 'Laravel APP_KEY has an unexpected length', 'Generate a new key with php artisan key:generate, after planning for existing encrypted data.');
+            }
+        }
+        foreach (['barryvdh/laravel-debugbar' => 'Laravel Debugbar', 'laravel/telescope' => 'Telescope'] as $name => $label) {
+            if (isset($prod[$name])) {
+                $r['findings'][] = finding("laravel:$name", 'framework', 'medium', "$label is installed as a production dependency", "Move it to require-dev, or confirm that it is disabled and access-controlled in production.");
+            }
+        }
+    }
+
+    if (isset($prod['symfony/framework-bundle'])) {
+        $file = is_file("$base/.env.local") ? '.env.local' : null;
+        if ($file === null) {
+            $r['passed'][] = 'Symfony: no .env.local here, so environment settings were skipped. Run this on the server to check them.';
+        } else {
+            $env = readDotenv("$base/$file");
+            if (($env['APP_ENV'] ?? '') === 'dev' || in_array($env['APP_DEBUG'] ?? '', ['1', 'true'], true)) {
+                $r['findings'][] = finding('symfony:dev-mode', 'framework', 'high', "Symfony is in dev or debug mode in $file", 'Set APP_ENV=prod and APP_DEBUG=0 on production.');
+            }
+        }
+        if (isset($prod['symfony/web-profiler-bundle'])) {
+            $r['findings'][] = finding('symfony:profiler', 'framework', 'medium', 'The Symfony web profiler is a production dependency', 'Move symfony/web-profiler-bundle to require-dev.');
+        }
+    }
+
+    if (is_file("$base/wp-config.php") && is_file("$base/wp-includes/version.php")) {
+        $config = (string) file_get_contents("$base/wp-config.php");
+        $on = static fn (string $c): bool => (bool) preg_match('/define\s*\(\s*[\'"]' . $c . '[\'"]\s*,\s*(true|1)\s*\)/i', $config);
+        if ($on('WP_DEBUG')) {
+            $r['findings'][] = finding('wordpress:debug', 'framework', 'medium', 'WP_DEBUG is on', 'Set WP_DEBUG to false on production, and never show errors to visitors.');
+        }
+        if (!$on('DISALLOW_FILE_EDIT')) {
+            $r['findings'][] = finding('wordpress:file-edit', 'framework', 'low', 'WordPress lets admins edit code from the dashboard', "Add define('DISALLOW_FILE_EDIT', true); to wp-config.php, so a stolen admin login can't change code.");
+        }
+        preg_match('/\$wp_version\s*=\s*[\'"]([^\'"]+)/', (string) file_get_contents("$base/wp-includes/version.php"), $m);
+        $wp = $m[1] ?? null;
+        $latest = $offline || $wp === null ? null : (fetchJson('https://api.wordpress.org/core/version-check/1.7/')['offers'][0]['current'] ?? null);
+        if ($wp !== null && $latest !== null && version_compare($wp, (string) $latest, '<')) {
+            $r['findings'][] = finding('wordpress:behind', 'framework', 'high', "WordPress $wp is behind the latest release ($latest)", 'Back up, then update WordPress core, plugins and themes.');
+        } elseif ($wp !== null && $latest === null) {
+            $r['errors'][] = 'WordPress latest version not checked.';
+        }
+    }
+    return $r;
+}
+
+/** One-time file for the web server. It returns only PHP's version and the listed settings, then deletes itself. */
+function probeSource(string $token): string
+{
+    $names = var_export(array_column(iniRules(), 0), true);
+    return <<<PROBE
+    <?php
+    // Created by php-security-check. Deletes itself after one use or after 15 minutes.
+    if (time() - filemtime(__FILE__) > 900) { @unlink(__FILE__); http_response_code(404); exit; }
+    if (!hash_equals('$token', (string) (\$_GET['token'] ?? ''))) { http_response_code(404); exit; }
+    \$ini = [];
+    foreach ($names as \$n) { \$v = ini_get(\$n); if (\$v !== false) { \$ini[\$n] = \$v; } }
+    header('Content-Type: application/json');
+    header('Cache-Control: no-store');
+    echo json_encode(['version' => PHP_VERSION, 'sapi' => PHP_SAPI, 'ini_file' => php_ini_loaded_file() ? basename(php_ini_loaded_file()) : null, 'opcache' => function_exists('opcache_get_status') && (bool) ini_get('opcache.enable'), 'ini' => \$ini]);
+    @unlink(__FILE__);
+
+    PROBE;
+}
+
+function createProbe(string $dir): string
+{
+    if (!is_dir($dir) || !is_writable($dir)) {
+        fwrite(STDERR, "Can't write to $dir. Use --dir=PUBLIC_FOLDER.\n");
+        exit(2);
+    }
+    $name = 'psc-probe-' . bin2hex(random_bytes(8)) . '.php';
+    $token = bin2hex(random_bytes(16));
+    file_put_contents(rtrim($dir, '/') . "/$name", preg_replace('/^    /m', '', probeSource($token)));
+    return "Created $dir/$name\n\nDeploy it if needed, then within 15 minutes run:\n\n  php-security-check . --probe='https://YOUR-SITE/$name?token=$token'\n\nIt reports only the PHP version and the settings this tool checks, works once, then deletes itself.\nIf you don't use it, delete the file.\n";
+}
+
+/** Ignore entries need a reason and a future expiry date, so accepted risks get looked at again. */
+function applyIgnores(array $report, string $path): array
+{
+    $file = rtrim($path, '/') . '/.php-security-check.json';
+    $report['ignored'] = [];
+    if (!is_file($file)) {
+        return $report;
+    }
+    $config = json_decode((string) file_get_contents($file), true);
+    if (!is_array($config)) {
+        $report['errors'][] = '.php-security-check.json is not valid JSON, so nothing was ignored.';
+        return $report;
+    }
+    $rules = [];
+    foreach ($config['ignore'] ?? [] as $i) {
+        $id = (string) ($i['id'] ?? '');
+        if ($id === '' || empty($i['reason']) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) ($i['expires'] ?? ''))) {
+            $report['errors'][] = "Ignore entry \"$id\" needs an id, a reason and an expires date (YYYY-MM-DD), so it was not applied.";
+        } elseif ($i['expires'] < date('Y-m-d')) {
+            $report['errors'][] = "Ignore entry \"$id\" expired on {$i['expires']}, so it applies no more.";
+        } else {
+            $rules[$id] = $i;
+        }
+    }
+    $keep = [];
+    foreach ($report['findings'] as $f) {
+        if (isset($rules[$f['id']])) {
+            $report['ignored'][] = $f + ['reason' => $rules[$f['id']]['reason'], 'expires' => $rules[$f['id']]['expires']];
+        } else {
+            $keep[] = $f;
+        }
+    }
+    $report['findings'] = $keep;
+    return $report;
+}
+
+function sarif(array $report): string
+{
+    $level = ['info' => 'note', 'low' => 'note', 'medium' => 'warning', 'high' => 'error', 'critical' => 'error'];
+    $rules = $results = [];
+    foreach ($report['findings'] as $f) {
+        $rules[$f['id']] = ['id' => $f['id'], 'shortDescription' => ['text' => $f['title']], 'help' => ['text' => $f['fix']]] + ($f['link'] ? ['helpUri' => $f['link']] : []);
+        $results[] = ['ruleId' => $f['id'], 'level' => $level[$f['severity']], 'message' => ['text' => "{$f['title']}. {$f['fix']}"], 'locations' => [['physicalLocation' => ['artifactLocation' => ['uri' => $f['check'] === 'composer' ? 'composer.lock' : ($f['check'] === 'ini' ? 'php.ini' : 'composer.json')]]]]];
+    }
+    return json_encode(['$schema' => 'https://json.schemastore.org/sarif-2.1.0.json', 'version' => '2.1.0', 'runs' => [['tool' => ['driver' => ['name' => 'php-security-check', 'version' => TOOL_VERSION, 'informationUri' => 'https://github.com/phpscientist/php-security-check', 'rules' => array_values($rules)]], 'results' => $results]]], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
 }
 
 function render(array $report): string
@@ -271,7 +503,19 @@ function render(array $report): string
         ? sprintf("%d issue%s found: %s\n", $real, $real === 1 ? '' : 's', implode(', ', array_map(static fn ($s) => ($counts[$s] ?? 0) . " $s", array_filter(['critical', 'high', 'medium', 'low'], static fn ($s) => isset($counts[$s])))))
         : "No issues found in the checks that ran.\n";
     foreach ($report['findings'] as $f) {
-        $o .= "\n[" . strtoupper($f['severity']) . "] {$f['title']}\n  Fix: {$f['fix']}\n" . ($f['link'] ? "  More: {$f['link']}\n" : '');
+        $o .= "\n[" . strtoupper($f['severity']) . "] {$f['title']}\n  Fix: {$f['fix']}\n" . ($f['link'] ? "  More: {$f['link']}\n" : '') . "  Id: {$f['id']}\n";
+    }
+    if ($report['plan']) {
+        $o .= "\nUpgrade plan\n" . str_repeat('-', 12) . "\n";
+        foreach ($report['plan'] as $p) {
+            $o .= sprintf("%s %s -> %s (%s, %s, fixes %d)\n  %s\n", $p['package'], $p['from'], $p['to'] ?? 'no fixed version listed', $p['size'] ?? 'unknown', $p['direct'] ? 'direct' : 'indirect', $p['advisories'], $p['command']);
+        }
+    }
+    if ($report['iniBlock']) {
+        $o .= "\nSuggested php.ini settings\n" . str_repeat('-', 26) . "\n" . implode("\n", $report['iniBlock']) . "\n";
+    }
+    if ($report['ignored']) {
+        $o .= "\n" . count($report['ignored']) . " finding(s) ignored by .php-security-check.json\n";
     }
     foreach ($report['passed'] as $p) {
         $o .= "\n  OK  $p";
@@ -291,6 +535,10 @@ if (isset($args['help'])) {
     echo str_replace('{TOOL}', TOOL_VERSION, usage());
     exit(0);
 }
+if (($args['command'] ?? '') === 'probe') {
+    echo createProbe(is_string($args['dir'] ?? null) ? $args['dir'] : 'public');
+    exit(0);
+}
 $format = (string) ($args['format'] ?? 'text');
 $failOn = (string) ($args['fail-on'] ?? 'high');
 if (!in_array($format, ['text', 'json'], true) || ($failOn !== 'none' && !isset(RANK[$failOn]))) {
@@ -304,15 +552,46 @@ $data = json_decode((string) @file_get_contents($dataFile), true);
 $data = is_array($data) ? $data : ($offline ? null : fetchJson(DATA_URL));
 $coreMissing = !is_array($data);
 $data = $data ?? ['advisories' => [], 'learn' => []];
+$path = (string) $args['path'];
 $version = is_string($args['php-version'] ?? null) ? normalizeVersion($args['php-version']) : PHP_VERSION;
+$probeIni = null;
+$probeErrors = $probeFindings = $probePassed = [];
+if (is_string($args['probe'] ?? null)) {
+    $host = (string) parse_url($args['probe'], PHP_URL_HOST);
+    if (parse_url($args['probe'], PHP_URL_SCHEME) !== 'https' && !in_array($host, ['localhost', '127.0.0.1'], true)) {
+        fwrite(STDERR, "The probe URL must use https, so its token isn't sent in the clear.\n");
+        exit(2);
+    }
+    $probe = fetchJson($args['probe']);
+    if ($probe === null || !isset($probe['version'], $probe['ini'])) {
+        $probeErrors[] = 'The probe did not answer. It works once and for 15 minutes, so create a new one. Results below are NOT for your web server.';
+    } else {
+        $version = (string) $probe['version'];
+        $probeIni = $probe['ini'];
+        $probePassed[] = "Read from your web server: PHP $version (" . $probe['sapi'] . '), ' . ($probe['ini_file'] ?? 'no php.ini file') . ', OPcache ' . ($probe['opcache'] ? 'on' : 'off') . '. The probe has deleted itself.';
+        if ($version !== PHP_VERSION) {
+            $probeFindings[] = finding('php:cli-differs', 'php', 'info', "The command line runs PHP " . PHP_VERSION . " but the web server runs PHP $version", 'Update both. Cron jobs and queue workers use the command-line version.');
+        }
+    }
+}
 
-$parts = [checkPhpVersion($version, $offline, $data['advisories']), checkIni(is_string($args['ini'] ?? null) ? $args['ini'] : null), checkComposer((string) $args['path'], $offline, $data['learn'])];
-$report = ['tool' => TOOL_VERSION, 'php' => $version, 'findings' => array_merge(...array_column($parts, 'findings')), 'passed' => array_merge(...array_column($parts, 'passed')), 'errors' => array_merge(...array_column($parts, 'errors'))];
+$parts = [
+    ['findings' => $probeFindings, 'passed' => $probePassed, 'errors' => $probeErrors],
+    checkPhpVersion($version, $offline, $data['advisories']),
+    checkIni(is_string($args['ini'] ?? null) ? $args['ini'] : null, $probeIni),
+    checkComposer($path, $offline, $data['learn']),
+    checkFrameworks($path, $offline),
+];
+$report = ['tool' => TOOL_VERSION, 'php' => $version, 'findings' => array_merge(...array_column($parts, 'findings')), 'plan' => $parts[3]['plan'] ?? [], 'iniBlock' => $parts[2]['iniBlock'] ?? [], 'passed' => array_merge(...array_column($parts, 'passed')), 'errors' => array_merge(...array_column($parts, 'errors'))];
+$report = applyIgnores($report, $path);
 if ($coreMissing) {
     $report['errors'][] = 'Known PHP core flaws not checked: the advisory list could not be loaded.';
 }
 usort($report['findings'], static fn ($a, $b) => RANK[$b['severity']] <=> RANK[$a['severity']]);
 
+if (is_string($args['sarif'] ?? null)) {
+    file_put_contents($args['sarif'], sarif($report));
+}
 echo $format === 'json' ? json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n" : render($report);
 
 $failing = $failOn !== 'none' && array_filter($report['findings'], static fn ($f) => RANK[$f['severity']] >= RANK[$failOn]);
