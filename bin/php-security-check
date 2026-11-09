@@ -9,7 +9,8 @@ declare(strict_types=1);
  * No dependencies. Reads public data from php.net, endoflife.date and Packagist; sends only package names.
  */
 
-const TOOL_VERSION = '0.1.0';
+const TOOL_VERSION = '0.1.1';
+const DATA_URL = 'https://raw.githubusercontent.com/phpscientist/php-security-check/main/data/php-core.json';
 const HOME = 'https://phpscientist.com/tools/?utm_source=php-security-check&utm_medium=cli';
 const RANK = ['info' => 0, 'low' => 1, 'medium' => 2, 'high' => 3, 'critical' => 4];
 
@@ -297,12 +298,19 @@ if (!in_array($format, ['text', 'json'], true) || ($failOn !== 'none' && !isset(
     exit(2);
 }
 $dataFile = dirname(__DIR__) . '/data/php-core.json';
-$data = json_decode((string) @file_get_contents($dataFile), true) ?: ['advisories' => [], 'learn' => []];
 $offline = isset($args['no-network']);
+$data = json_decode((string) @file_get_contents($dataFile), true);
+// The one-file download has no data folder: use the published list, and say so if that isn't possible.
+$data = is_array($data) ? $data : ($offline ? null : fetchJson(DATA_URL));
+$coreMissing = !is_array($data);
+$data = $data ?? ['advisories' => [], 'learn' => []];
 $version = is_string($args['php-version'] ?? null) ? normalizeVersion($args['php-version']) : PHP_VERSION;
 
 $parts = [checkPhpVersion($version, $offline, $data['advisories']), checkIni(is_string($args['ini'] ?? null) ? $args['ini'] : null), checkComposer((string) $args['path'], $offline, $data['learn'])];
 $report = ['tool' => TOOL_VERSION, 'php' => $version, 'findings' => array_merge(...array_column($parts, 'findings')), 'passed' => array_merge(...array_column($parts, 'passed')), 'errors' => array_merge(...array_column($parts, 'errors'))];
+if ($coreMissing) {
+    $report['errors'][] = 'Known PHP core flaws not checked: the advisory list could not be loaded.';
+}
 usort($report['findings'], static fn ($a, $b) => RANK[$b['severity']] <=> RANK[$a['severity']]);
 
 echo $format === 'json' ? json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n" : render($report);
