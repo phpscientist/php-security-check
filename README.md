@@ -28,6 +28,10 @@ display_errors = Off
 ## Install
 
 ```bash
+# Composer
+composer require --dev phpscientist/php-security-check
+vendor/bin/php-security-check .
+
 # Single file
 curl -LO https://raw.githubusercontent.com/phpscientist/php-security-check/main/bin/php-security-check
 php php-security-check /path/to/project
