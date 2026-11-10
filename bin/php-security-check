@@ -9,7 +9,7 @@ declare(strict_types=1);
  * No dependencies. Reads public data from php.net, endoflife.date and Packagist; sends only package names.
  */
 
-const TOOL_VERSION = '0.2.0';
+const TOOL_VERSION = '0.2.1';
 const DATA_URL = 'https://raw.githubusercontent.com/phpscientist/php-security-check/main/data/php-core.json';
 const HOME = 'https://phpscientist.com/tools/?utm_source=php-security-check&utm_medium=cli';
 const RANK = ['info' => 0, 'low' => 1, 'medium' => 2, 'high' => 3, 'critical' => 4];
